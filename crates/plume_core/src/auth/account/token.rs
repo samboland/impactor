@@ -16,6 +16,14 @@ use crate::auth::{
 
 impl Account {
     pub async fn get_app_token(&self, app_name: &str) -> Result<AppToken, Error> {
+        if let Some(token) = self
+            .verified_service_tokens
+            .as_ref()
+            .and_then(|tokens| tokens.app_token(app_name))
+        {
+            log::info!("Using the requested service token issued by native key verification");
+            return Ok(token);
+        }
         let spd = self.spd.as_ref().unwrap();
         let dsid = spd.get("adsid").unwrap().as_string().unwrap();
         let auth_token = spd.get("GsIdmsToken").unwrap().as_string().unwrap();

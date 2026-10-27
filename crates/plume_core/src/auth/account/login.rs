@@ -71,7 +71,6 @@ impl Account {
         // device handled the push. Fetched lazily the first time 2FA is needed.
         let mut trusted_phone_numbers: Vec<TrustedPhoneNumber> = Vec::new();
         let mut security_key_verified = false;
-        let mut security_key_pet = None;
 
         loop {
             // Read Apple's available second factors before requesting a code.
@@ -116,8 +115,7 @@ impl Account {
                             "Security-key authentication task failed".into(),
                         )
                     })??;
-                    security_key_pet = _self.verify_security_key(assertion, headers).await?;
-                    response = LoginState::NeedsLogin;
+                    response = _self.verify_security_key(assertion, headers).await?;
                     security_key_verified = true;
                 }
                 LoginState::NeedsDevice2FA => {
@@ -184,16 +182,9 @@ impl Account {
                     }
                 }
                 LoginState::NeedsLogin => {
-                    // Native verification can issue a password-equivalent token.
-                    // It completes SRP; approval alone does not grant a session.
-                    let pet = security_key_pet.take();
-                    log::info!(
-                        "Completing Apple login after security key = {security_key_verified}, using returned PET = {}",
-                        pet.is_some()
-                    );
-                    response = _self
-                        .login_email_pass(&username, pet.as_deref().unwrap_or(&password))
-                        .await?
+                    // If no native tokens were issued, repeat the ordinary
+                    // login once. A PET is not the user's SRP password.
+                    response = _self.login_email_pass(&username, &password).await?;
                 }
                 LoginState::LoggedIn => return Ok(_self),
                 LoginState::NeedsExtraStep(step) => {

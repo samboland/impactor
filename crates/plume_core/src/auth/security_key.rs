@@ -14,6 +14,7 @@ pub struct SecurityKeyChallenge {
     key_handles: Vec<String>,
     rp_id: Option<String>,
     request_id: Option<String>,
+    user_verification: Option<UserVerification>,
     #[serde(skip)]
     pub(crate) session_headers: reqwest::header::HeaderMap,
 }
@@ -52,7 +53,21 @@ fn decode(value: &str) -> Result<Vec<u8>, Error> {
         .map_err(|_| key_error("Apple returned invalid security-key challenge data"))
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum UserVerification {
+    Required,
+    Preferred,
+    Discouraged,
+}
+
 impl SecurityKeyChallenge {
+    fn user_verification(&self) -> UserVerification {
+        // This flow already verified a password. Use presence-only unless
+        // Apple's challenge explicitly requests a different verification policy.
+        self.user_verification
+            .unwrap_or(UserVerification::Discouraged)
+    }
     fn rp_id(&self) -> Result<&str, Error> {
         match self.rp_id.as_deref().unwrap_or("apple.com") {
             rp @ ("apple.com" | "gsa.apple.com") => Ok(rp),
@@ -113,6 +128,11 @@ pub(crate) fn sign(challenge: SecurityKeyChallenge) -> Result<SecurityKeyAsserti
     };
     use windows::core::{HSTRING, w};
 
+    log::info!(
+        "Security-key user verification policy: {:?}, explicitly requested by Apple = {}",
+        challenge.user_verification(),
+        challenge.user_verification.is_some()
+    );
     let mut client_json = challenge.client_data()?;
     let rp_id = HSTRING::from(challenge.rp_id()?);
     let mut handles = challenge
@@ -147,7 +167,11 @@ pub(crate) fn sign(challenge: SecurityKeyChallenge) -> Result<SecurityKeyAsserti
             pCredentials: credentials.as_mut_ptr(),
         },
         dwAuthenticatorAttachment: WEBAUTHN_AUTHENTICATOR_ATTACHMENT_CROSS_PLATFORM,
-        dwUserVerificationRequirement: WEBAUTHN_USER_VERIFICATION_REQUIREMENT_PREFERRED,
+        dwUserVerificationRequirement: match challenge.user_verification() {
+            UserVerification::Required => WEBAUTHN_USER_VERIFICATION_REQUIREMENT_REQUIRED,
+            UserVerification::Preferred => WEBAUTHN_USER_VERIFICATION_REQUIREMENT_PREFERRED,
+            UserVerification::Discouraged => WEBAUTHN_USER_VERIFICATION_REQUIREMENT_DISCOURAGED,
+        },
         ..Default::default()
     };
 
@@ -380,5 +404,161 @@ mod password_token_tests {
         headers.append("x-apple-pe-token", "Zm9vOmJhcg==".parse().unwrap());
         headers.append("x-apple-pe-token", "Zm9vOmJheg==".parse().unwrap());
         assert!(password_token(&headers).is_err());
+    }
+}
+
+/// Only tokens from Apple's successful native verification response enter here.
+#[derive(Clone)]
+pub(crate) struct VerifiedServiceTokens(plist::Dictionary);
+
+impl std::fmt::Debug for VerifiedServiceTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifiedServiceTokens")
+            .field("count", &self.0.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl VerifiedServiceTokens {
+    pub(crate) fn from_headers(headers: &reqwest::header::HeaderMap) -> Result<Self, Error> {
+        let mut tokens = plist::Dictionary::new();
+        for header in ["x-apple-gs-token", "x-apple-hb-token"] {
+            for value in headers.get_all(header) {
+                let value = value
+                    .to_str()
+                    .map_err(|_| key_error("Invalid native service-token header"))?;
+                let bytes = decode(value)?;
+                let decoded = std::str::from_utf8(&bytes)
+                    .map_err(|_| key_error("Invalid native service-token encoding"))?;
+                let mut fields = decoded.split(':');
+                let service = fields.next().unwrap_or_default();
+                let token = fields.next().unwrap_or_default();
+                if !service.starts_with("com.apple.gs.") || token.is_empty() {
+                    return Err(key_error("Invalid native service-token fields"));
+                }
+                if tokens.contains_key(service) {
+                    return Err(key_error(
+                        "Apple returned conflicting service-token headers",
+                    ));
+                }
+                let mut data = plist::Dictionary::new();
+                data.insert("token".into(), plist::Value::String(token.into()));
+                tokens.insert(service.into(), plist::Value::Dictionary(data));
+            }
+        }
+        if let Some(token) = password_token(headers)? {
+            let mut data = plist::Dictionary::new();
+            data.insert("token".into(), plist::Value::String(token));
+            tokens.insert(
+                "com.apple.gs.idms.pet".into(),
+                plist::Value::Dictionary(data),
+            );
+        }
+        Ok(Self(tokens))
+    }
+
+    pub(crate) fn has_pet(&self) -> bool {
+        self.0.contains_key("com.apple.gs.idms.pet")
+    }
+
+    pub(crate) fn app_token(&self, app: &str) -> Option<crate::auth::AppToken> {
+        let token = self
+            .0
+            .get(app)?
+            .as_dictionary()?
+            .get("token")?
+            .as_string()?;
+        Some(crate::auth::AppToken {
+            app_tokens: self.0.clone(),
+            auth_token: token.into(),
+            app: app.into(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod native_session_tests {
+    use super::*;
+    use reqwest::header::HeaderMap;
+
+    #[test]
+    fn repeated_service_headers_are_kept_and_selected_by_exact_scope() {
+        let mut headers = HeaderMap::new();
+        for value in [
+            "com.apple.gs.xcode.auth:xcode-fixture:300",
+            "com.apple.gs.icloud.auth:icloud-fixture:300",
+        ] {
+            headers.append(
+                "x-apple-gs-token",
+                general_purpose::STANDARD.encode(value).parse().unwrap(),
+            );
+        }
+        headers.insert(
+            "x-apple-pe-token",
+            general_purpose::STANDARD
+                .encode("fixture-account:pet-fixture")
+                .parse()
+                .unwrap(),
+        );
+        let tokens = VerifiedServiceTokens::from_headers(&headers).unwrap();
+        assert!(tokens.has_pet());
+        assert_eq!(
+            tokens
+                .app_token("com.apple.gs.xcode.auth")
+                .unwrap()
+                .auth_token,
+            "xcode-fixture"
+        );
+        assert_eq!(
+            tokens
+                .app_token("com.apple.gs.icloud.auth")
+                .unwrap()
+                .auth_token,
+            "icloud-fixture"
+        );
+        assert!(tokens.app_token("com.apple.gs.other.auth").is_none());
+        let debug = format!("{tokens:?}");
+        assert!(!debug.contains("pet-fixture"));
+        assert!(!debug.contains("xcode-fixture"));
+    }
+
+    #[test]
+    fn empty_or_unrelated_headers_do_not_supply_a_session_token() {
+        let tokens = VerifiedServiceTokens::from_headers(&HeaderMap::new()).unwrap();
+        assert!(!tokens.has_pet());
+        assert!(tokens.app_token("com.apple.gs.xcode.auth").is_none());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-apple-gs-token",
+            general_purpose::STANDARD
+                .encode("unrelated-service:private-fixture")
+                .parse()
+                .unwrap(),
+        );
+        assert!(VerifiedServiceTokens::from_headers(&headers).is_err());
+    }
+}
+
+#[cfg(test)]
+mod verification_policy_tests {
+    use super::*;
+    #[test]
+    fn password_plus_key_defaults_to_presence_but_keeps_explicit_apple_policy() {
+        let base = serde_json::json!({"challenge": "AQI", "keyHandles": ["AwQ"]});
+        let challenge: SecurityKeyChallenge = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(challenge.user_verification(), UserVerification::Discouraged);
+        for (policy, expected) in [
+            ("required", UserVerification::Required),
+            ("preferred", UserVerification::Preferred),
+            ("discouraged", UserVerification::Discouraged),
+        ] {
+            let mut input = base.clone();
+            input["userVerification"] = policy.into();
+            let challenge: SecurityKeyChallenge = serde_json::from_value(input).unwrap();
+            assert_eq!(challenge.user_verification(), expected);
+        }
+        let mut input = base;
+        input["userVerification"] = "unrecognized-policy".into();
+        assert!(serde_json::from_value::<SecurityKeyChallenge>(input).is_err());
     }
 }

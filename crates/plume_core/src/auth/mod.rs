@@ -18,6 +18,7 @@ pub struct Account {
     pub anisette: Arc<Mutex<AnisetteData>>,
     pub spd: Option<plist::Dictionary>,
     pub client: Client,
+    pub(crate) verified_service_tokens: Option<security_key::VerifiedServiceTokens>,
 }
 
 impl Account {
@@ -32,6 +33,7 @@ impl Account {
             anisette: Arc::new(Mutex::new(anisette)),
             spd: None,
             client,
+            verified_service_tokens: None,
         })
     }
 }

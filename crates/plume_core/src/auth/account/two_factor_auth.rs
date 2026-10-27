@@ -147,10 +147,10 @@ impl Account {
     }
 
     pub(crate) async fn verify_security_key(
-        &self,
+        &mut self,
         assertion: crate::auth::security_key::SecurityKeyAssertion,
         session_headers: HeaderMap,
-    ) -> Result<Option<String>, Error> {
+    ) -> Result<LoginState, Error> {
         let mut headers = self.build_2fa_headers(true).await;
         headers.extend(session_headers);
         let response = self
@@ -171,14 +171,15 @@ impl Account {
             "Apple security-key assertion: HTTP {status}, PET header = {pet_present}, service-token count = {service_token_count}"
         );
         // A conflict can indicate another required authentication step. It does
-        // not grant access: a fresh GrandSlam login must still issue valid tokens.
+        // not grant access: native tokens or a completed login are still required.
         if !status.is_success() && status.as_u16() != 409 {
             return Err(Error::AuthSrpWithMessage(
                 status.as_u16().into(),
                 "Apple rejected the security-key assertion".into(),
             ));
         }
-        let password_token = crate::auth::security_key::password_token(response.headers())?;
+        let tokens =
+            crate::auth::security_key::VerifiedServiceTokens::from_headers(response.headers())?;
         let json_response = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -191,7 +192,20 @@ impl Account {
                 return Err(Error::AuthSrpWithMessage(status.as_u16().into(), message));
             }
         }
-        Ok(password_token)
+        let complete = tokens.has_pet() || tokens.app_token("com.apple.gs.xcode.auth").is_some();
+        log::info!(
+            "Native key verification: issued PET = {}, issued Xcode token = {}",
+            tokens.has_pet(),
+            tokens.app_token("com.apple.gs.xcode.auth").is_some()
+        );
+        if complete {
+            self.verified_service_tokens = Some(tokens);
+            // Completion is based on tokens returned by Apple's native
+            // verifier. The developer API must still validate its service token.
+            Ok(LoginState::LoggedIn)
+        } else {
+            Ok(LoginState::NeedsLogin)
+        }
     }
 
     pub async fn verify_2fa(&self, code: String) -> Result<LoginState, Error> {

@@ -97,3 +97,20 @@ malformed tokens, and duplicate-token rejection. The test 4 live result is pendi
 
 Verification also rejects Apple service-error payloads inside accepted HTTP responses.
 Only numeric service codes enter diagnostics; response messages and tokens do not.
+
+## Test 4 live result and test 5
+
+Apple accepted key verification with HTTP 200 and issued a PET plus 15 service
+tokens. Reusing the PET as an SRP password failed with -22406. Test 5 removes
+that extra handshake and keeps the service tokens from the native response.
+`get_app_token` selects only the requested service token. Developer API calls
+still validate that token before an account is saved.
+
+The Windows request now defaults to `discouraged` user verification for this
+password-plus-key flow. Explicit `required` or `preferred` values from Apple's
+challenge take precedence. No account or hardware-key settings change.
+Windows or the authenticator can still require UV because of their own policy.
+
+Sixteen offline tests cover the token response, exact service scope, redacted
+diagnostics, and user-verification policy. Live signing still needs verification.
+The test 5 window is labeled explicitly.

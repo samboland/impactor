@@ -19,7 +19,7 @@ mod subscriptions;
 mod tray;
 
 pub const APP_NAME: &str = "Impactor";
-pub const APP_NAME_VERSIONED: &str = concat!("Impactor", " - Version ", env!("CARGO_PKG_VERSION"), " (security-key test 4)");
+pub const APP_NAME_VERSIONED: &str = concat!("Impactor", " - Version ", env!("CARGO_PKG_VERSION"), " (security-key test 5)");
 
 fn main() -> iced::Result {
     env_logger::init();
