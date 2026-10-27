@@ -69,6 +69,14 @@ impl Account {
             .send()
             .await?;
         let status = req.status();
+        let json_response = req
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("json"));
+        log::info!(
+            "Apple authentication discovery: HTTP {status}, JSON response = {json_response}"
+        );
         if !status.is_success() {
             return Err(Error::AuthSrpWithMessage(
                 status.as_u16().into(),
@@ -81,7 +89,19 @@ impl Account {
                 session_headers.insert(HeaderName::from_static(name), value.clone());
             }
         }
-        let mut new_state = req.json::<AuthenticationExtras>().await?;
+        let value = req.json::<serde_json::Value>().await?;
+        log::info!(
+            "Apple authentication discovery fields: fsaChallenge = {}, trustedPhoneNumbers = {}",
+            value.get("fsaChallenge").is_some(),
+            value.get("trustedPhoneNumbers").is_some()
+        );
+        let mut new_state =
+            serde_json::from_value::<AuthenticationExtras>(value).map_err(|_| {
+                Error::AuthSrpWithMessage(
+                    0,
+                    "Apple returned an unsupported authentication response shape".into(),
+                )
+            })?;
         log::info!(
             "Apple authentication methods: security key = {}, trusted phone count = {}",
             new_state.fsa_challenge.is_some(),

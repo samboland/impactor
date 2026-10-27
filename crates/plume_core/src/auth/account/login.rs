@@ -75,16 +75,23 @@ impl Account {
         loop {
             // Read Apple's available second factors before requesting a code.
             // Security-key accounts cannot receive device or SMS codes.
+            let mut discovery_failure = None;
             if matches!(
                 response,
                 LoginState::NeedsDevice2FA
                     | LoginState::NeedsSMS2FA
                     | LoginState::Needs2FAVerification
             ) {
-                if let Ok(extras) = _self.get_auth_extras().await {
-                    trusted_phone_numbers = extras.trusted_phone_numbers;
-                    if let Some(challenge) = extras.fsa_challenge {
-                        response = LoginState::NeedsSecurityKey(challenge);
+                match _self.get_auth_extras().await {
+                    Ok(extras) => {
+                        trusted_phone_numbers = extras.trusted_phone_numbers;
+                        if let Some(challenge) = extras.fsa_challenge {
+                            response = LoginState::NeedsSecurityKey(challenge);
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!("Apple authentication discovery failed: {error}");
+                        discovery_failure = Some(error.to_string());
                     }
                 }
             }
@@ -112,7 +119,16 @@ impl Account {
                     security_key_verified = true;
                 }
                 LoginState::NeedsDevice2FA => {
-                    response = _self.send_2fa_to_devices().await?;
+                    response = _self.send_2fa_to_devices().await.map_err(|error| {
+                        match discovery_failure {
+                            Some(discovery) => Error::AuthSrpWithMessage(0, format!(
+                                "{error}. Authentication discovery also failed: {discovery}"
+                            )),
+                            None => Error::AuthSrpWithMessage(0, format!(
+                                "{error}. Apple returned no security-key challenge for this native session"
+                            )),
+                        }
+                    })?;
                     if trusted_phone_numbers.is_empty() {
                         if let Ok(extras) = _self.get_auth_extras().await {
                             trusted_phone_numbers = extras.trusted_phone_numbers;
