@@ -1,7 +1,7 @@
 # Experimental Windows security-key authentication
 
 This local patch adds a Windows WebAuthn assertion path to GrandSlam login.
-Sam verified live Apple Account sign-in on Windows on 2026-10-27. App signing remains unverified.
+Sam verified live Apple Account sign-in, app signing, and TrollInstallerX installation on Windows on 2026-10-27.
 
 ## Behavior
 
@@ -129,4 +129,3 @@ The patched Windows GUI also signed and installed TrollInstallerX 1.0.3 on
 the paired iPhone 8 (iOS 16.3). Impactor reported 100% Finished.
 Developer Mode was disabled at the next read-only device check.
 Jailbreaking and phone screen control remain pending.
-
