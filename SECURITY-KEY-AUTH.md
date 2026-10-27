@@ -124,3 +124,9 @@ The response did not include an Xcode-scoped token, so the existing app-token
 request path ran after native verification. Signing and installation remain open.
 
 No upstream PR was submitted.
+
+The patched Windows GUI also signed and installed TrollInstallerX 1.0.3 on
+the paired iPhone 8 (iOS 16.3). Impactor reported 100% Finished.
+Developer Mode was disabled at the next read-only device check.
+Jailbreaking and phone screen control remain pending.
+
