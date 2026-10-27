@@ -65,3 +65,19 @@ or session headers. Do not publish account files, passwords, or authentication l
 No upstream PR is part of this patch. The contribution guide says AI-generated
 PRs are automatically closed. This implementation used AI assistance.
 The maintainer has not approved an exception.
+
+## 2026-10-27 discovery failure
+
+The live native `/auth` lookup returned HTTP 403 with a non-JSON response.
+No security-key challenge reached the Windows client in that attempt.
+A separate probe with a dummy identity token returned 403 for a Windows
+profile and 401 for the modern Mac AuthKit profile used by SideInstaller.
+The probe did not use account credentials or a real session token.
+
+Discovery now retries a non-JSON 403 once with that Mac client-info header,
+preserving the same anisette and identity token. JSON denials, 401, and 429
+do not trigger a retry. A successful challenge carries the compatibility
+header into assertion verification. Live authentication still needs testing.
+
+The app title includes `security-key test 3` to distinguish this test build.
+There are eight offline tests after the retry classification check.

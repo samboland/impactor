@@ -59,15 +59,35 @@ impl Account {
     }
 
     pub async fn get_auth_extras(&self) -> Result<AuthenticationExtras, Error> {
-        let headers = self.build_2fa_headers(true);
+        let mut headers = self.build_2fa_headers(true).await;
 
-        let req = self
+        let mut req = self
             .client
             .get("https://gsa.apple.com/auth")
-            .headers(headers.await)
+            .headers(headers.clone())
             .header("Accept", "application/json")
             .send()
             .await?;
+        let mut compatibility_profile = None;
+        if bare_client_rejection(req.status(), req.headers()) {
+            // Apple's auth pages reject some client profiles before reading the
+            // account token. Retry once, retaining the same anisette and token.
+            // Profile reference: FrizzleM/SideInstaller grandslam.rs.
+            let client_info = HeaderValue::from_static(
+                "<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>",
+            );
+            headers.insert("X-Mme-Client-Info", client_info.clone());
+            log::info!(
+                "Apple auth page rejected the client profile; trying Mac compatibility headers once"
+            );
+            req = self
+                .client
+                .get("https://gsa.apple.com/auth")
+                .headers(headers)
+                .send()
+                .await?;
+            compatibility_profile = Some(client_info);
+        }
         let status = req.status();
         let json_response = req
             .headers()
@@ -84,6 +104,9 @@ impl Account {
             ));
         }
         let mut session_headers = HeaderMap::new();
+        if let Some(client_info) = compatibility_profile {
+            session_headers.insert("X-Mme-Client-Info", client_info);
+        }
         for name in ["scnt", "x-apple-id-session-id"] {
             if let Some(value) = req.headers().get(name) {
                 session_headers.insert(HeaderName::from_static(name), value.clone());
@@ -229,5 +252,42 @@ impl Account {
         }
 
         headers
+    }
+}
+
+// A JSON denial can be an account-specific decision. Do not retry those,
+// invalid credentials, rate limits, or other server failures with a new profile.
+fn bare_client_rejection(status: reqwest::StatusCode, headers: &HeaderMap) -> bool {
+    status == reqwest::StatusCode::FORBIDDEN
+        && !headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("json"))
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn only_bare_profile_denials_get_a_compatibility_retry() {
+        let mut headers = HeaderMap::new();
+        assert!(bare_client_rejection(StatusCode::FORBIDDEN, &headers));
+        headers.insert("content-type", "text/html".parse().unwrap());
+        assert!(bare_client_rejection(StatusCode::FORBIDDEN, &headers));
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::OK,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            assert!(!bare_client_rejection(status, &headers));
+        }
+        headers.insert(
+            "content-type",
+            "application/json;charset=UTF-8".parse().unwrap(),
+        );
+        assert!(!bare_client_rejection(StatusCode::FORBIDDEN, &headers));
     }
 }
