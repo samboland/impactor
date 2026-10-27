@@ -1,7 +1,7 @@
 # Experimental Windows security-key authentication
 
 This local patch adds a Windows WebAuthn assertion path to GrandSlam login.
-It is not yet verified against a live Apple Account or a signing operation.
+Sam verified live Apple Account sign-in on Windows on 2026-10-27. App signing remains unverified.
 
 ## Behavior
 
@@ -114,3 +114,13 @@ Windows or the authenticator can still require UV because of their own policy.
 Sixteen offline tests cover the token response, exact service scope, redacted
 diagnostics, and user-verification policy. Live signing still needs verification.
 The test 5 window is labeled explicitly.
+
+## Test 5 live result
+
+Sam confirmed successful sign-in on 2026-10-27. The diagnostic log records
+HTTP 200 for native key verification, a PET, and 15 service tokens. Apple did
+not include an explicit userVerification policy; the client used Discouraged.
+The response did not include an Xcode-scoped token, so the existing app-token
+request path ran after native verification. Signing and installation remain open.
+
+No upstream PR was submitted.
