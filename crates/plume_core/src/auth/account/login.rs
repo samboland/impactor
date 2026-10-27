@@ -70,9 +70,47 @@ impl Account {
         // Cached so the caller can be offered an SMS fallback even when a trusted
         // device handled the push. Fetched lazily the first time 2FA is needed.
         let mut trusted_phone_numbers: Vec<TrustedPhoneNumber> = Vec::new();
+        let mut security_key_verified = false;
 
         loop {
+            // Read Apple's available second factors before requesting a code.
+            // Security-key accounts cannot receive device or SMS codes.
+            if matches!(
+                response,
+                LoginState::NeedsDevice2FA
+                    | LoginState::NeedsSMS2FA
+                    | LoginState::Needs2FAVerification
+            ) {
+                if let Ok(extras) = _self.get_auth_extras().await {
+                    trusted_phone_numbers = extras.trusted_phone_numbers;
+                    if let Some(challenge) = extras.fsa_challenge {
+                        response = LoginState::NeedsSecurityKey(challenge);
+                    }
+                }
+            }
             match response {
+                LoginState::NeedsSecurityKey(challenge) => {
+                    if security_key_verified {
+                        return Err(Error::AuthSrpWithMessage(
+                            0,
+                            "Apple still requires authentication after security-key verification"
+                                .into(),
+                        ));
+                    }
+                    let headers = challenge.session_headers.clone();
+                    let assertion = tokio::task::spawn_blocking(move || {
+                        super::super::security_key::sign(challenge)
+                    })
+                    .await
+                    .map_err(|_| {
+                        Error::AuthSrpWithMessage(
+                            0,
+                            "Security-key authentication task failed".into(),
+                        )
+                    })??;
+                    response = _self.verify_security_key(assertion, headers).await?;
+                    security_key_verified = true;
+                }
                 LoginState::NeedsDevice2FA => {
                     response = _self.send_2fa_to_devices().await?;
                     if trusted_phone_numbers.is_empty() {

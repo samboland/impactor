@@ -68,19 +68,65 @@ impl Account {
             .header("Accept", "application/json")
             .send()
             .await?;
-        let status = req.status().as_u16();
+        let status = req.status();
+        if !status.is_success() {
+            return Err(Error::AuthSrpWithMessage(
+                status.as_u16().into(),
+                "Failed to read authentication methods".into(),
+            ));
+        }
+        let mut session_headers = HeaderMap::new();
+        for name in ["scnt", "x-apple-id-session-id"] {
+            if let Some(value) = req.headers().get(name) {
+                session_headers.insert(HeaderName::from_static(name), value.clone());
+            }
+        }
         let mut new_state = req.json::<AuthenticationExtras>().await?;
-        if status == 201 {
-            new_state.new_state = Some(LoginState::NeedsSMS2FAVerification(VerifyBody {
-                phone_number: PhoneNumber {
-                    id: new_state.trusted_phone_numbers.first().unwrap().id,
-                },
-                mode: "sms".to_string(),
-                security_code: None,
-            }));
+        log::info!(
+            "Apple authentication methods: security key = {}, trusted phone count = {}",
+            new_state.fsa_challenge.is_some(),
+            new_state.trusted_phone_numbers.len()
+        );
+        if let Some(challenge) = &mut new_state.fsa_challenge {
+            challenge.session_headers = session_headers;
+        }
+        if status.as_u16() == 201 && new_state.fsa_challenge.is_none() {
+            if let Some(phone) = new_state.trusted_phone_numbers.first() {
+                new_state.new_state = Some(LoginState::NeedsSMS2FAVerification(VerifyBody {
+                    phone_number: PhoneNumber { id: phone.id },
+                    mode: "sms".to_string(),
+                    security_code: None,
+                }));
+            }
         }
 
         Ok(new_state)
+    }
+
+    pub(crate) async fn verify_security_key(
+        &self,
+        assertion: crate::auth::security_key::SecurityKeyAssertion,
+        session_headers: HeaderMap,
+    ) -> Result<LoginState, Error> {
+        let mut headers = self.build_2fa_headers(true).await;
+        headers.extend(session_headers);
+        let response = self
+            .client
+            .post("https://gsa.apple.com/auth/verify/security/key")
+            .headers(headers)
+            .json(&assertion)
+            .send()
+            .await?;
+        let status = response.status();
+        // A conflict can indicate another required authentication step. It does
+        // not grant access: a fresh GrandSlam login must still issue valid tokens.
+        if !status.is_success() && status.as_u16() != 409 {
+            return Err(Error::AuthSrpWithMessage(
+                status.as_u16().into(),
+                "Apple rejected the security-key assertion".into(),
+            ));
+        }
+        Ok(LoginState::NeedsLogin)
     }
 
     pub async fn verify_2fa(&self, code: String) -> Result<LoginState, Error> {

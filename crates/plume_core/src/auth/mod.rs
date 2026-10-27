@@ -1,5 +1,6 @@
 pub mod account;
 pub mod anisette_data;
+pub mod security_key;
 
 use omnisette::AnisetteConfiguration;
 use reqwest::Client;
@@ -112,6 +113,7 @@ pub struct AppToken {
 pub enum LoginState {
     LoggedIn,
     NeedsDevice2FA,
+    NeedsSecurityKey(security_key::SecurityKeyChallenge),
     Needs2FAVerification,
     NeedsSMS2FA,
     NeedsSMS2FAVerification(VerifyBody),
@@ -176,7 +178,9 @@ pub enum TwoFactorAction {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthenticationExtras {
+    #[serde(default)]
     pub trusted_phone_numbers: Vec<TrustedPhoneNumber>,
+    pub fsa_challenge: Option<security_key::SecurityKeyChallenge>,
     pub recovery_url: Option<String>,
     pub cant_use_phone_number_url: Option<String>,
     pub dont_have_access_url: Option<String>,
