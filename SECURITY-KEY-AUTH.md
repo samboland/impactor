@@ -81,3 +81,19 @@ header into assertion verification. Live authentication still needs testing.
 
 The app title includes `security-key test 3` to distinguish this test build.
 There are eight offline tests after the retry classification check.
+
+## Test 3 live result and test 4
+
+The compatibility retry reached HTTP 200 and a native `fsaChallenge`.
+Windows produced an assertion. A subsequent login still required authentication.
+Test 4 records assertion status, token presence, and service-token count without
+recording token values. If Apple returns an `X-Apple-PE-Token`, the client keeps
+it only in the current in-memory session and uses it for the completing SRP
+handshake. The handshake and developer-service checks must still succeed.
+The code does not mark login complete from an assertion HTTP status alone.
+
+There are thirteen offline tests, including native PET formats, missing tokens,
+malformed tokens, and duplicate-token rejection. The test 4 live result is pending.
+
+Verification also rejects Apple service-error payloads inside accepted HTTP responses.
+Only numeric service codes enter diagnostics; response messages and tokens do not.

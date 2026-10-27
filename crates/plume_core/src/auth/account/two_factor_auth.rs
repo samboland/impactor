@@ -150,7 +150,7 @@ impl Account {
         &self,
         assertion: crate::auth::security_key::SecurityKeyAssertion,
         session_headers: HeaderMap,
-    ) -> Result<LoginState, Error> {
+    ) -> Result<Option<String>, Error> {
         let mut headers = self.build_2fa_headers(true).await;
         headers.extend(session_headers);
         let response = self
@@ -161,6 +161,15 @@ impl Account {
             .send()
             .await?;
         let status = response.status();
+        let pet_present = response.headers().contains_key("x-apple-pe-token");
+        let service_token_count = response
+            .headers()
+            .get_all("x-apple-gs-token")
+            .iter()
+            .count();
+        log::info!(
+            "Apple security-key assertion: HTTP {status}, PET header = {pet_present}, service-token count = {service_token_count}"
+        );
         // A conflict can indicate another required authentication step. It does
         // not grant access: a fresh GrandSlam login must still issue valid tokens.
         if !status.is_success() && status.as_u16() != 409 {
@@ -169,7 +178,20 @@ impl Account {
                 "Apple rejected the security-key assertion".into(),
             ));
         }
-        Ok(LoginState::NeedsLogin)
+        let password_token = crate::auth::security_key::password_token(response.headers())?;
+        let json_response = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("json"));
+        if json_response {
+            let body = response.json::<serde_json::Value>().await?;
+            if let Some(message) = verification_service_error(&body) {
+                log::warn!("Apple security-key assertion: {message}");
+                return Err(Error::AuthSrpWithMessage(status.as_u16().into(), message));
+            }
+        }
+        Ok(password_token)
     }
 
     pub async fn verify_2fa(&self, code: String) -> Result<LoginState, Error> {
@@ -289,5 +311,54 @@ mod compatibility_tests {
             "application/json;charset=UTF-8".parse().unwrap(),
         );
         assert!(!bare_client_rejection(StatusCode::FORBIDDEN, &headers));
+    }
+}
+
+// Apple can return a service error with an otherwise accepted HTTP status.
+// Include only numeric error codes, never arbitrary server response values.
+fn verification_service_error(body: &serde_json::Value) -> Option<String> {
+    let errors = body.get("serviceErrors")?.as_array()?;
+    if errors.is_empty() {
+        return None;
+    }
+    let code = errors
+        .first()
+        .and_then(|error| error.get("code"))
+        .and_then(|code| match code {
+            serde_json::Value::String(code) => Some(code.clone()),
+            serde_json::Value::Number(code) => Some(code.to_string()),
+            _ => None,
+        })
+        .filter(|code| {
+            !code.is_empty()
+                && code.len() <= 12
+                && code.chars().all(|c| c.is_ascii_digit() || c == '-')
+        });
+    Some(match code {
+        Some(code) => format!("Apple rejected security-key verification (service code {code})"),
+        None => "Apple rejected security-key verification (service error)".into(),
+    })
+}
+
+#[cfg(test)]
+mod verification_response_tests {
+    use super::*;
+
+    #[test]
+    fn service_errors_are_not_accepted_as_completed_verification() {
+        let body = serde_json::json!({"serviceErrors": [{"code": "-21669", "message": "private fixture detail"}]});
+        let error = verification_service_error(&body).unwrap();
+        assert!(error.contains("-21669"));
+        assert!(!error.contains("private fixture detail"));
+        assert!(verification_service_error(&serde_json::json!({"serviceErrors": []})).is_none());
+    }
+
+    #[test]
+    fn arbitrary_error_code_text_is_not_exposed() {
+        let error = verification_service_error(
+            &serde_json::json!({"serviceErrors": [{"code": "private fixture value"}]}),
+        )
+        .unwrap();
+        assert!(!error.contains("private fixture value"));
     }
 }

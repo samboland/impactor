@@ -302,3 +302,83 @@ mod auth_extras_tests {
         assert_eq!(extras.trusted_phone_numbers[0].id, 7);
     }
 }
+
+/// A PET is a password-equivalent token. Never include it in diagnostics.
+pub(crate) fn password_token(
+    headers: &reqwest::header::HeaderMap,
+) -> Result<Option<String>, Error> {
+    let mut tokens = headers.get_all("x-apple-pe-token").iter();
+    let Some(header) = tokens.next() else {
+        return Ok(None);
+    };
+    if tokens.next().is_some() {
+        return Err(key_error(
+            "Apple returned multiple password-equivalent tokens",
+        ));
+    }
+    let value = header
+        .to_str()
+        .map_err(|_| key_error("Apple returned an invalid password-token header"))?;
+    let decoded = decode(value)?;
+    let decoded = std::str::from_utf8(&decoded)
+        .map_err(|_| key_error("Apple returned an invalid password-token encoding"))?;
+    let mut fields = decoded.split(':');
+    let identifier = fields.next().unwrap_or_default();
+    let token = fields.next().unwrap_or_default();
+    if identifier.is_empty() || token.is_empty() {
+        return Err(key_error(
+            "Apple returned an incomplete password-token header",
+        ));
+    }
+    Ok(Some(token.to_owned()))
+}
+
+#[cfg(test)]
+mod password_token_tests {
+    use super::*;
+    use reqwest::header::HeaderMap;
+
+    #[test]
+    fn extracts_pet_from_native_response_with_optional_lifetime() {
+        for value in [
+            "fixture-account:fixture-token",
+            "fixture-account:fixture-token:300:1234567890",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-apple-pe-token",
+                general_purpose::STANDARD.encode(value).parse().unwrap(),
+            );
+            assert_eq!(
+                password_token(&headers).unwrap().as_deref(),
+                Some("fixture-token")
+            );
+        }
+    }
+
+    #[test]
+    fn absent_pet_is_not_treated_as_verified_login() {
+        assert!(password_token(&HeaderMap::new()).unwrap().is_none());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-apple-gs-token", "fixture-service-token".parse().unwrap());
+        assert!(password_token(&headers).unwrap().is_none());
+    }
+
+    #[test]
+    fn invalid_pet_headers_fail_without_disclosing_values() {
+        for value in ["fixture-account:", ":fixture-token", "fixture-account"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-apple-pe-token",
+                general_purpose::STANDARD.encode(value).parse().unwrap(),
+            );
+            let error = password_token(&headers).unwrap_err().to_string();
+            assert!(!error.contains("fixture-account"));
+            assert!(!error.contains("fixture-token"));
+        }
+        let mut headers = HeaderMap::new();
+        headers.append("x-apple-pe-token", "Zm9vOmJhcg==".parse().unwrap());
+        headers.append("x-apple-pe-token", "Zm9vOmJheg==".parse().unwrap());
+        assert!(password_token(&headers).is_err());
+    }
+}
